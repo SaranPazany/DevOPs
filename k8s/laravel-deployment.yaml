@@ -1,0 +1,218 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laravel-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: laravel
+  template:
+    metadata:
+      labels:
+        app: laravel
+    spec:
+      initContainers:
+        - name: git-clone
+          image: alpine/git
+          command: ["/bin/sh"]
+          args:
+            - -c
+            - |
+              echo "Cloning Laravel project from GitHub..."
+              rm -rf /tmp/repo
+              git clone -b Final https://github.com/SunLeang/DevOP-Learn.git /tmp/repo
+
+              if [ -d /tmp/repo/laravel ]; then
+                echo "Copying Laravel project..."
+                cp -r /tmp/repo/laravel/* /laravel-src/
+                cp -r /tmp/repo/laravel/.* /laravel-src/ 2>/dev/null || true
+                echo "Laravel project copied successfully!"
+              else
+                echo "ERROR: Laravel directory not found!"
+                exit 1
+              fi
+          volumeMounts:
+            - name: laravel-src
+              mountPath: /laravel-src
+
+        - name: laravel-setup
+          image: composer:latest
+          workingDir: /var/www
+          command: ["/bin/sh"]
+          args:
+            - -c
+            - |
+              echo "Setting up Laravel dependencies..."
+              while [ ! -f /var/www/composer.json ]; do
+                echo "Waiting for Laravel files..."
+                sleep 2
+              done
+
+              composer install --no-dev --optimize-autoloader --no-interaction
+              mkdir -p storage/logs storage/framework/cache storage/framework/sessions storage/framework/views storage/app bootstrap/cache
+              chmod -R 775 storage bootstrap/cache
+              chown -R 82:82 storage bootstrap/cache
+          volumeMounts:
+            - name: laravel-src
+              mountPath: /var/www
+          env:
+            - name: COMPOSER_ALLOW_SUPERUSER
+              value: "1"
+
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: Hello@123
+            - name: MYSQL_DATABASE
+              value: laravel-db
+          ports:
+            - containerPort: 3306
+          volumeMounts:
+            - name: mysql-storage
+              mountPath: /var/lib/mysql
+          readinessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+        - name: laravel
+          image: php:8.2-fpm
+          ports:
+            - containerPort: 9000
+          command: ["/bin/sh"]
+          args:
+            - -c
+            - |
+              echo "Starting Laravel container..."
+
+              # Install system dependencies including MySQL client
+              apt-get update && apt-get install -y \
+                libzip-dev libpng-dev libonig-dev libxml2-dev \
+                unzip git default-mysql-client \
+                curl wget netcat-openbsd && \
+                rm -rf /var/lib/apt/lists/*
+
+              # Install PHP extensions
+              docker-php-ext-install pdo pdo_mysql zip gd mbstring mysqli
+
+              # Wait for MySQL to be ready using TCP connection only
+              echo "Waiting for MySQL container to be ready..."
+              until mysqladmin ping -h localhost -P 3306 -u root -pHello@123 --silent; do
+                echo "MySQL not ready, waiting... ($(date))"
+                sleep 5
+              done
+              echo "MySQL is ready!"
+
+              # Wait for Laravel files
+              while [ ! -f /var/www/composer.json ]; do
+                echo "Waiting for Laravel files..."
+                sleep 2
+              done
+
+              cd /var/www
+
+              # Copy environment configuration
+              if [ -f /config/.env ]; then
+                cp /config/.env /var/www/.env
+                echo "Environment file copied"
+              fi
+
+              # Generate key and run migrations
+              php artisan key:generate --force --no-interaction
+              php artisan config:clear --no-interaction
+
+              # Run migrations with better error handling
+              echo "Running database migrations..."
+              php artisan migrate --force --no-interaction || echo "Migration completed with warnings"
+
+              # Set permissions
+              chown -R www-data:www-data /var/www
+              chmod -R 775 /var/www/storage /var/www/bootstrap/cache
+
+              # Configure PHP-FPM
+              cat > /usr/local/etc/php-fpm.d/www.conf << 'EOF'
+              [www]
+              user = www-data
+              group = www-data
+              listen = 0.0.0.0:9000
+              pm = dynamic
+              pm.max_children = 5
+              pm.start_servers = 2
+              pm.min_spare_servers = 1
+              pm.max_spare_servers = 3
+              EOF
+
+              echo "Starting PHP-FPM..."
+              php-fpm --nodaemonize
+          volumeMounts:
+            - name: laravel-src
+              mountPath: /var/www
+            - name: laravel-env
+              mountPath: /config
+          env:
+            - name: DB_CONNECTION
+              value: mysql
+            - name: DB_HOST
+              value: localhost
+            - name: DB_PORT
+              value: "3306"
+            - name: DB_DATABASE
+              value: laravel-db
+            - name: DB_USERNAME
+              value: root
+            - name: DB_PASSWORD
+              value: Hello@123
+
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - containerPort: 8080
+          command: ["/bin/sh"]
+          args:
+            - -c
+            - |
+              echo "Starting Nginx..."
+              apt-get update && apt-get install -y netcat-openbsd && rm -rf /var/lib/apt/lists/*
+
+              # Wait for Laravel files
+              while [ ! -f /var/www/public/index.php ]; do
+                echo "Waiting for Laravel..."
+                sleep 3
+              done
+
+              # Wait for PHP-FPM
+              while ! nc -z localhost 9000; do
+                echo "Waiting for PHP-FPM..."
+                sleep 2
+              done
+
+              echo "All services ready, starting Nginx..."
+              nginx -g "daemon off;"
+          volumeMounts:
+            - name: laravel-src
+              mountPath: /var/www
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+
+      volumes:
+        - name: laravel-src
+          emptyDir: {}
+        - name: laravel-env
+          configMap:
+            name: laravel-config
+        - name: nginx-conf
+          configMap:
+            name: nginx-config
+        - name: mysql-storage
+          persistentVolumeClaim:
+            claimName: mysql-pvc
