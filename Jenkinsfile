@@ -30,19 +30,33 @@ pipeline {
                 checkout scm
                 
                 script {
-                    if (isUnix()) {
-                        env.GIT_COMMIT_MSG = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
-                        env.GIT_AUTHOR_NAME = sh(script: 'git log -1 --pretty=%an', returnStdout: true).trim()
-                        env.GIT_AUTHOR_EMAIL = sh(script: 'git log -1 --pretty=%ae', returnStdout: true).trim()
-                    } else {
-                        // Windows PowerShell commands
-                        env.GIT_COMMIT_MSG = bat(script: '@git log -1 --pretty=%%B', returnStdout: true).trim()
-                        env.GIT_AUTHOR_NAME = bat(script: '@git log -1 --pretty=%%an', returnStdout: true).trim()
-                        env.GIT_AUTHOR_EMAIL = bat(script: '@git log -1 --pretty=%%ae', returnStdout: true).trim()
+                    try {
+                        if (isUnix()) {
+                            env.GIT_COMMIT_MSG = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
+                            env.GIT_AUTHOR_NAME = sh(script: 'git log -1 --pretty=%an', returnStdout: true).trim()
+                            env.GIT_AUTHOR_EMAIL = sh(script: 'git log -1 --pretty=%ae', returnStdout: true).trim()
+                            env.GIT_COMMIT_HASH = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                            env.GIT_BRANCH_NAME = sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+                        } else {
+                            env.GIT_COMMIT_MSG = bat(script: '@git log -1 --pretty=%%B', returnStdout: true).trim()
+                            env.GIT_AUTHOR_NAME = bat(script: '@git log -1 --pretty=%%an', returnStdout: true).trim()
+                            env.GIT_AUTHOR_EMAIL = bat(script: '@git log -1 --pretty=%%ae', returnStdout: true).trim()
+                            env.GIT_COMMIT_HASH = bat(script: '@git rev-parse HEAD', returnStdout: true).trim()
+                            env.GIT_BRANCH_NAME = bat(script: '@git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+                        }
+                    } catch (Exception e) {
+                        echo "Warning: Could not extract git information: ${e.getMessage()}"
+                        env.GIT_COMMIT_MSG = "Unable to retrieve commit message"
+                        env.GIT_AUTHOR_NAME = "Unknown"
+                        env.GIT_AUTHOR_EMAIL = "unknown@example.com"
+                        env.GIT_COMMIT_HASH = "unknown"
+                        env.GIT_BRANCH_NAME = "unknown"
                     }
                     
                     echo "📝 Commit: ${env.GIT_COMMIT_MSG}"
                     echo "👤 Author: ${env.GIT_AUTHOR_NAME} <${env.GIT_AUTHOR_EMAIL}>"
+                    echo "🌿 Branch: ${env.GIT_BRANCH_NAME}"
+                    echo "🔗 Commit Hash: ${env.GIT_COMMIT_HASH}"
                 }
             }
         }
@@ -55,7 +69,15 @@ pipeline {
                     if (isUnix()) {
                         sh '''
                             echo "📋 Checking Kubernetes cluster..."
-                            kubectl cluster-info || (echo "❌ Kubernetes not available" && exit 1)
+                            if ! kubectl cluster-info > /dev/null 2>&1; then
+                                echo "❌ Kubernetes cluster is not available"
+                                echo "💡 Please ensure your Kubernetes cluster is running:"
+                                echo "   - Docker Desktop: Enable Kubernetes in Settings"
+                                echo "   - Minikube: Run 'minikube start'"
+                                echo "   - Kind: Run 'kind create cluster'"
+                                exit 1
+                            fi
+                            echo "✅ Kubernetes cluster is accessible"
                             
                             echo "📋 Checking Docker..."
                             docker --version || (echo "❌ Docker not available" && exit 1)
@@ -68,7 +90,16 @@ pipeline {
                     } else {
                         bat '''
                             echo "📋 Checking Kubernetes cluster..."
-                            kubectl cluster-info || (echo "❌ Kubernetes not available" && exit /b 1)
+                            kubectl cluster-info >nul 2>&1
+                            if errorlevel 1 (
+                                echo "❌ Kubernetes cluster is not available"
+                                echo "💡 Please ensure your Kubernetes cluster is running:"
+                                echo "   - Docker Desktop: Enable Kubernetes in Settings"
+                                echo "   - Minikube: Run 'minikube start'"
+                                echo "   - Kind: Run 'kind create cluster'"
+                                exit /b 1
+                            )
+                            echo "✅ Kubernetes cluster is accessible"
                             
                             echo "📋 Checking Docker..."
                             docker --version || (echo "❌ Docker not available" && exit /b 1)
@@ -321,8 +352,8 @@ pipeline {
                     <ul>
                         <li><strong>Author:</strong> ${env.GIT_AUTHOR_NAME} &lt;${env.GIT_AUTHOR_EMAIL}&gt;</li>
                         <li><strong>Message:</strong> ${env.GIT_COMMIT_MSG}</li>
-                        <li><strong>Commit:</strong> ${GIT_COMMIT}</li>
-                        <li><strong>Branch:</strong> ${GIT_BRANCH}</li>
+                        <li><strong>Commit:</strong> ${env.GIT_COMMIT_HASH ?: 'N/A'}</li>
+                        <li><strong>Branch:</strong> ${env.GIT_BRANCH_NAME ?: 'N/A'}</li>
                     </ul>
                     
                     <h3>🚀 Deployment Status:</h3>
@@ -362,30 +393,30 @@ pipeline {
                     <ul>
                         <li><strong>Build Number:</strong> #${BUILD_NUMBER}</li>
                         <li><strong>Project:</strong> ${JOB_NAME}</li>
-                        <li><strong>Failed Stage:</strong> ${env.STAGE_NAME}</li>
+                        <li><strong>Failed Stage:</strong> ${env.STAGE_NAME ?: 'Unknown'}</li>
                         <li><strong>Duration:</strong> ${currentBuild.durationString}</li>
                     </ul>
                     
                     <h3>📝 Latest Commit:</h3>
                     <ul>
-                        <li><strong>Author:</strong> ${env.GIT_AUTHOR_NAME} &lt;${env.GIT_AUTHOR_EMAIL}&gt;</li>
-                        <li><strong>Message:</strong> ${env.GIT_COMMIT_MSG}</li>
-                        <li><strong>Commit:</strong> ${GIT_COMMIT}</li>
-                        <li><strong>Branch:</strong> ${GIT_BRANCH}</li>
+                        <li><strong>Author:</strong> ${env.GIT_AUTHOR_NAME ?: 'Unknown'} &lt;${env.GIT_AUTHOR_EMAIL ?: 'unknown@example.com'}&gt;</li>
+                        <li><strong>Message:</strong> ${env.GIT_COMMIT_MSG ?: 'N/A'}</li>
+                        <li><strong>Commit:</strong> ${env.GIT_COMMIT_HASH ?: 'N/A'}</li>
+                        <li><strong>Branch:</strong> ${env.GIT_BRANCH_NAME ?: 'N/A'}</li>
                     </ul>
                     
                     <h3>🔧 Troubleshooting:</h3>
                     <ul>
                         <li>Check the build console output: <a href="${BUILD_URL}console">${BUILD_URL}console</a></li>
                         <li>Review the build logs for error details</li>
-                        <li>Verify Kubernetes cluster is running</li>
+                        <li>Verify Kubernetes cluster is running: kubectl cluster-info</li>
                         <li>Check Docker daemon status</li>
                         <li>Validate WSL and Ansible installation</li>
                     </ul>
                     
                     <p><strong>🚨 Please investigate and resolve the issues promptly.</strong></p>
                     """,
-                    to: "${env.RECIPIENT_LIST}, ${env.GIT_AUTHOR_EMAIL}",
+                    to: "${env.RECIPIENT_LIST}, ${env.GIT_AUTHOR_EMAIL ?: 'admin@example.com'}",
                     mimeType: 'text/html'
                 )
             }
