@@ -4,8 +4,11 @@ pipeline {
     environment {
         DOCKER_HOST = 'tcp://localhost:2375'
         RECIPIENT_LIST = 'srengty@gmail.com'
-        // Use WSL for Ansible commands
         WSL_ANSIBLE = 'wsl ansible-playbook'
+        // Ensure we use the right kubectl context
+        KUBECONFIG = "${env.USERPROFILE}\\.kube\\config"
+        // Set Jenkins URL explicitly since it's running on 8088
+        JENKINS_URL = 'http://localhost:8088/'
     }
     
     triggers {
@@ -24,6 +27,8 @@ pipeline {
                 script {
                     echo "🚀 Starting Laravel DevOps Pipeline..."
                     echo "📊 Build #${BUILD_NUMBER} on ${NODE_NAME}"
+                    echo "🔧 Jenkins URL: http://localhost:8088/"
+                    echo "🔧 Kubernetes API: https://kubernetes.docker.internal:6443"
                 }
                 
                 cleanWs()
@@ -66,50 +71,40 @@ pipeline {
                 script {
                     echo "🔍 Checking system prerequisites..."
                     
-                    if (isUnix()) {
-                        sh '''
-                            echo "📋 Checking Kubernetes cluster..."
-                            if ! kubectl cluster-info > /dev/null 2>&1; then
-                                echo "❌ Kubernetes cluster is not available"
-                                echo "💡 Please ensure your Kubernetes cluster is running:"
-                                echo "   - Docker Desktop: Enable Kubernetes in Settings"
-                                echo "   - Minikube: Run 'minikube start'"
-                                echo "   - Kind: Run 'kind create cluster'"
-                                exit 1
-                            fi
-                            echo "✅ Kubernetes cluster is accessible"
-                            
-                            echo "📋 Checking Docker..."
-                            docker --version || (echo "❌ Docker not available" && exit 1)
-                            
-                            echo "📋 Checking Ansible..."
-                            ansible --version || (echo "❌ Ansible not available" && exit 1)
-                            
-                            echo "✅ All prerequisites satisfied!"
-                        '''
-                    } else {
-                        bat '''
-                            echo "📋 Checking Kubernetes cluster..."
-                            kubectl cluster-info >nul 2>&1
-                            if errorlevel 1 (
-                                echo "❌ Kubernetes cluster is not available"
-                                echo "💡 Please ensure your Kubernetes cluster is running:"
-                                echo "   - Docker Desktop: Enable Kubernetes in Settings"
-                                echo "   - Minikube: Run 'minikube start'"
-                                echo "   - Kind: Run 'kind create cluster'"
-                                exit /b 1
-                            )
-                            echo "✅ Kubernetes cluster is accessible"
-                            
-                            echo "📋 Checking Docker..."
-                            docker --version || (echo "❌ Docker not available" && exit /b 1)
-                            
-                            echo "📋 Checking WSL and Ansible..."
-                            wsl ansible --version || (echo "❌ Ansible not available in WSL" && exit /b 1)
-                            
-                            echo "✅ All prerequisites satisfied!"
-                        '''
-                    }
+                    bat '''
+                        echo "📋 Checking Kubernetes cluster..."
+                        echo "Setting kubectl context to docker-desktop..."
+                        kubectl config use-context docker-desktop
+                        
+                        echo "Current context:"
+                        kubectl config current-context
+                        
+                        echo "Testing cluster connectivity..."
+                        kubectl cluster-info --request-timeout=10s
+                        if errorlevel 1 (
+                            echo "❌ Kubernetes cluster is not available"
+                            echo "💡 Troubleshooting steps:"
+                            echo "   1. Verify Docker Desktop is running"
+                            echo "   2. Ensure Kubernetes is enabled in Docker Desktop settings"
+                            echo "   3. Current kubectl context should be 'docker-desktop'"
+                            echo "   4. Kubernetes should be accessible at https://kubernetes.docker.internal:6443"
+                            exit /b 1
+                        )
+                        echo "✅ Kubernetes cluster is accessible at https://kubernetes.docker.internal:6443"
+                        
+                        echo "📋 Checking nodes..."
+                        kubectl get nodes
+                        
+                        echo "📋 Checking Docker..."
+                        docker --version || (echo "❌ Docker not available" && exit /b 1)
+                        
+                        echo "📋 Checking WSL and Ansible..."
+                        wsl ansible --version || (echo "❌ Ansible not available in WSL" && exit /b 1)
+                        
+                        echo "✅ All prerequisites satisfied!"
+                        echo "🎯 Jenkins running on: http://localhost:8088"
+                        echo "🎯 Kubernetes API on: https://kubernetes.docker.internal:6443"
+                    '''
                 }
             }
         }
@@ -335,48 +330,45 @@ pipeline {
             script {
                 echo "🎉 Pipeline completed successfully!"
                 
-                emailext(
-                    subject: "✅ Laravel DevOps Build #${BUILD_NUMBER} - SUCCESS",
-                    body: """
-                    <h2>🎉 Laravel Terrain Booking System - Deployment Successful!</h2>
-                    
-                    <h3>📊 Build Information:</h3>
-                    <ul>
-                        <li><strong>Build Number:</strong> #${BUILD_NUMBER}</li>
-                        <li><strong>Project:</strong> ${JOB_NAME}</li>
-                        <li><strong>Duration:</strong> ${currentBuild.durationString}</li>
-                        <li><strong>Node:</strong> ${NODE_NAME}</li>
-                    </ul>
-                    
-                    <h3>📝 Latest Commit:</h3>
-                    <ul>
-                        <li><strong>Author:</strong> ${env.GIT_AUTHOR_NAME} &lt;${env.GIT_AUTHOR_EMAIL}&gt;</li>
-                        <li><strong>Message:</strong> ${env.GIT_COMMIT_MSG}</li>
-                        <li><strong>Commit:</strong> ${env.GIT_COMMIT_HASH ?: 'N/A'}</li>
-                        <li><strong>Branch:</strong> ${env.GIT_BRANCH_NAME ?: 'N/A'}</li>
-                    </ul>
-                    
-                    <h3>🚀 Deployment Status:</h3>
-                    <ul>
-                        <li>✅ Infrastructure deployed to Kubernetes</li>
-                        <li>✅ Laravel application running</li>
-                        <li>✅ Database (MySQL) operational</li>
-                        <li>✅ Web server (Nginx) responding</li>
-                        <li>✅ Ansible maintenance tasks completed</li>
-                        <li>✅ Database backup created</li>
-                    </ul>
-                    
-                    <h3>🌐 Access Information:</h3>
-                    <ul>
-                        <li><strong>Application URL:</strong> <a href="http://localhost:30080">http://localhost:30080</a></li>
-                        <li><strong>Build URL:</strong> <a href="${BUILD_URL}">${BUILD_URL}</a></li>
-                    </ul>
-                    
-                    <p><strong>🎯 Your Laravel Terrain Booking System is now live and ready for use!</strong></p>
-                    """,
-                    to: env.RECIPIENT_LIST,
-                    mimeType: 'text/html'
-                )
+                try {
+                    emailext(
+                        subject: "✅ Laravel DevOps Build #${BUILD_NUMBER} - SUCCESS",
+                        body: """
+                        <h2>🎉 Laravel Terrain Booking System - Deployment Successful!</h2>
+                        
+                        <h3>📊 Build Information:</h3>
+                        <ul>
+                            <li><strong>Build Number:</strong> #${BUILD_NUMBER}</li>
+                            <li><strong>Project:</strong> ${JOB_NAME}</li>
+                            <li><strong>Duration:</strong> ${currentBuild.durationString}</li>
+                            <li><strong>Jenkins URL:</strong> http://localhost:8088/</li>
+                            <li><strong>Kubernetes API:</strong> https://kubernetes.docker.internal:6443</li>
+                        </ul>
+                        
+                        <h3>📝 Latest Commit:</h3>
+                        <ul>
+                            <li><strong>Author:</strong> ${env.GIT_AUTHOR_NAME} &lt;${env.GIT_AUTHOR_EMAIL}&gt;</li>
+                            <li><strong>Message:</strong> ${env.GIT_COMMIT_MSG}</li>
+                            <li><strong>Commit:</strong> ${env.GIT_COMMIT_HASH}</li>
+                            <li><strong>Branch:</strong> ${env.GIT_BRANCH_NAME}</li>
+                        </ul>
+                        
+                        <h3>🌐 Access Information:</h3>
+                        <ul>
+                            <li><strong>Laravel Application:</strong> <a href="http://localhost:30080">http://localhost:30080</a></li>
+                            <li><strong>Jenkins Dashboard:</strong> <a href="http://localhost:8088/">http://localhost:8088/</a></li>
+                            <li><strong>Build Details:</strong> <a href="${BUILD_URL}">${BUILD_URL}</a></li>
+                        </ul>
+                        
+                        <p><strong>🎯 Your Laravel Terrain Booking System is now live!</strong></p>
+                        """,
+                        to: env.RECIPIENT_LIST,
+                        mimeType: 'text/html'
+                    )
+                } catch (Exception e) {
+                    echo "⚠️ Email notification failed: ${e.getMessage()}"
+                    echo "💡 Please configure SMTP settings in Jenkins"
+                }
             }
         }
         
@@ -384,54 +376,53 @@ pipeline {
             script {
                 echo "❌ Pipeline failed!"
                 
-                emailext(
-                    subject: "❌ Laravel DevOps Build #${BUILD_NUMBER} - FAILED",
-                    body: """
-                    <h2>❌ Laravel Terrain Booking System - Deployment Failed!</h2>
-                    
-                    <h3>📊 Build Information:</h3>
-                    <ul>
-                        <li><strong>Build Number:</strong> #${BUILD_NUMBER}</li>
-                        <li><strong>Project:</strong> ${JOB_NAME}</li>
-                        <li><strong>Failed Stage:</strong> ${env.STAGE_NAME ?: 'Unknown'}</li>
-                        <li><strong>Duration:</strong> ${currentBuild.durationString}</li>
-                    </ul>
-                    
-                    <h3>📝 Latest Commit:</h3>
-                    <ul>
-                        <li><strong>Author:</strong> ${env.GIT_AUTHOR_NAME ?: 'Unknown'} &lt;${env.GIT_AUTHOR_EMAIL ?: 'unknown@example.com'}&gt;</li>
-                        <li><strong>Message:</strong> ${env.GIT_COMMIT_MSG ?: 'N/A'}</li>
-                        <li><strong>Commit:</strong> ${env.GIT_COMMIT_HASH ?: 'N/A'}</li>
-                        <li><strong>Branch:</strong> ${env.GIT_BRANCH_NAME ?: 'N/A'}</li>
-                    </ul>
-                    
-                    <h3>🔧 Troubleshooting:</h3>
-                    <ul>
-                        <li>Check the build console output: <a href="${BUILD_URL}console">${BUILD_URL}console</a></li>
-                        <li>Review the build logs for error details</li>
-                        <li>Verify Kubernetes cluster is running: kubectl cluster-info</li>
-                        <li>Check Docker daemon status</li>
-                        <li>Validate WSL and Ansible installation</li>
-                    </ul>
-                    
-                    <p><strong>🚨 Please investigate and resolve the issues promptly.</strong></p>
-                    """,
-                    to: "${env.RECIPIENT_LIST}, ${env.GIT_AUTHOR_EMAIL ?: 'admin@example.com'}",
-                    mimeType: 'text/html'
-                )
+                try {
+                    emailext(
+                        subject: "❌ Laravel DevOps Build #${BUILD_NUMBER} - FAILED",
+                        body: """
+                        <h2>❌ Laravel Terrain Booking System - Deployment Failed!</h2>
+                        
+                        <h3>📊 Build Information:</h3>
+                        <ul>
+                            <li><strong>Build Number:</strong> #${BUILD_NUMBER}</li>
+                            <li><strong>Project:</strong> ${JOB_NAME}</li>
+                            <li><strong>Failed Stage:</strong> ${env.STAGE_NAME ?: 'Prerequisites Check'}</li>
+                            <li><strong>Jenkins URL:</strong> http://localhost:8088/</li>
+                        </ul>
+                        
+                        <h3>🔧 System Status:</h3>
+                        <ul>
+                            <li><strong>Jenkins:</strong> http://localhost:8088/ ✅</li>
+                            <li><strong>Kubernetes:</strong> https://kubernetes.docker.internal:6443 ✅</li>
+                            <li><strong>Kubectl Context:</strong> docker-desktop ✅</li>
+                        </ul>
+                        
+                        <h3>🔧 Troubleshooting:</h3>
+                        <ul>
+                            <li>Check console: <a href="http://localhost:8088/job/Laravel-DevOps-Pipeline/lastBuild/console">Build Console</a></li>
+                            <li>Verify Docker Desktop is running</li>
+                            <li>Ensure Kubernetes is enabled in Docker Desktop</li>
+                            <li>Test: kubectl cluster-info</li>
+                        </ul>
+                        """,
+                        to: "${env.RECIPIENT_LIST}, ${env.GIT_AUTHOR_EMAIL}",
+                        mimeType: 'text/html'
+                    )
+                } catch (Exception e) {
+                    echo "⚠️ Email notification failed: ${e.getMessage()}"
+                }
             }
         }
         
         always {
             script {
                 echo "🧹 Cleaning up..."
-                
-                // Archive important artifacts
                 if (fileExists('ansible/backups/')) {
                     archiveArtifacts artifacts: 'ansible/backups/*', allowEmptyArchive: true
                 }
-                
                 echo "📊 Build #${BUILD_NUMBER} completed."
+                echo "🌐 Jenkins: http://localhost:8088/"
+                echo "🎯 Kubernetes: https://kubernetes.docker.internal:6443"
             }
         }
     }
