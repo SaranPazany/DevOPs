@@ -1,0 +1,284 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laravel-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: laravel
+  template:
+    metadata:
+      labels:
+        app: laravel
+    spec:
+      initContainers:
+        - name: git-clone
+          image: alpine/git
+          command: ["/bin/sh"]
+          args:
+            - -c
+            - |
+              echo "Cloning Laravel project from GitHub..."
+              
+              # Remove existing directory to avoid conflicts
+              rm -rf /tmp/repo
+              
+              # Clone the repository
+              git clone -b Final https://github.com/SunLeang/DevOP-Learn.git /tmp/repo
+              
+              # Copy Laravel project to shared volume
+              if [ -d /tmp/repo/laravel ]; then
+                echo "Copying Laravel project..."
+                cp -r /tmp/repo/laravel/* /laravel-src/
+                cp -r /tmp/repo/laravel/.* /laravel-src/ 2>/dev/null || true
+                echo "Laravel project copied successfully!"
+                echo "Contents after copy:"
+                ls -la /laravel-src/
+              else
+                echo "ERROR: Laravel directory not found in repository!"
+                ls -la /tmp/repo/
+                exit 1
+              fi
+          volumeMounts:
+            - name: laravel-src
+              mountPath: /laravel-src
+
+        - name: laravel-setup
+          image: composer:latest
+          workingDir: /var/www
+          command: ["/bin/sh"]
+          args:
+            - -c
+            - |
+              echo "Setting up Laravel dependencies..."
+              
+              # Wait for git clone to complete
+              while [ ! -f /var/www/composer.json ]; do
+                echo "Waiting for Laravel files from git clone..."
+                sleep 2
+              done
+              
+              echo "Laravel files found, installing dependencies..."
+              
+              # Install dependencies
+              composer install --no-dev --optimize-autoloader --no-interaction --verbose
+              
+              # Create required directories if they don't exist
+              mkdir -p storage/logs storage/framework/cache storage/framework/sessions storage/framework/views storage/app
+              mkdir -p bootstrap/cache
+              
+              # Create .env from example if it doesn't exist
+              if [ ! -f .env ] && [ -f .env.example ]; then
+                echo "Creating .env from .env.example..."
+                cp .env.example .env
+              fi
+              
+              # Set proper permissions
+              chmod -R 775 storage bootstrap/cache
+              chown -R 82:82 storage bootstrap/cache
+              
+              echo "Laravel setup completed!"
+          volumeMounts:
+            - name: laravel-src
+              mountPath: /var/www
+          env:
+            - name: COMPOSER_ALLOW_SUPERUSER
+              value: "1"
+            - name: COMPOSER_MEMORY_LIMIT
+              value: "-1"
+
+      containers:
+        - name: laravel
+          image: php:8.2-fpm
+          ports:
+            - containerPort: 9000
+          command: ["/bin/sh"]
+          args:
+            - -c
+            - |
+              echo "Starting Laravel container..."
+
+              # Install required system packages
+              apt-get update && apt-get install -y \
+                libzip-dev \
+                libpng-dev \
+                libonig-dev \
+                libxml2-dev \
+                unzip \
+                git \
+                && rm -rf /var/lib/apt/lists/*
+
+              # Install PHP extensions
+              docker-php-ext-install pdo pdo_mysql zip gd mbstring
+
+              # Wait for Laravel files to be ready
+              echo "Waiting for Laravel setup to complete..."
+              timeout=120
+              while [ ! -f /var/www/composer.json ] && [ $timeout -gt 0 ]; do
+                echo "Waiting for Laravel files... ($timeout seconds left)"
+                sleep 2
+                timeout=$((timeout-2))
+              done
+
+              if [ ! -f /var/www/composer.json ]; then
+                echo "Laravel files not found after timeout!"
+                ls -la /var/www/
+                exit 1
+              fi
+
+              # Set working directory
+              cd /var/www
+
+              # Copy environment file from ConfigMap (this will overwrite existing .env)
+              if [ -f /config/.env ]; then
+                echo "Copying environment configuration..."
+                cp /config/.env /var/www/.env
+              fi
+
+              # Generate app key if needed
+              echo "Generating application key..."
+              php artisan key:generate --force --no-interaction || echo "Key generation failed, continuing..."
+
+              # Clear all caches instead of caching (to prevent 500 errors)
+              echo "Clearing Laravel caches..."
+              php artisan config:clear --no-interaction || echo "Config clear failed"
+              php artisan route:clear --no-interaction || echo "Route clear failed"
+              php artisan view:clear --no-interaction || echo "View clear failed"
+              php artisan cache:clear --no-interaction || echo "Cache clear failed"
+
+              # Try to run database migrations
+              echo "Running database migrations..."
+              php artisan migrate --force --no-interaction || echo "Migration failed or not needed"
+
+              # Set proper permissions
+              echo "Setting final permissions..."
+              chown -R www-data:www-data /var/www
+              chmod -R 775 /var/www/storage /var/www/bootstrap/cache
+
+              # Create proper PHP-FPM configuration
+              echo "Configuring PHP-FPM..."
+              cat > /usr/local/etc/php-fpm.d/www.conf << 'EOF'
+              [www]
+              user = www-data
+              group = www-data
+              listen = 0.0.0.0:9000
+              listen.owner = www-data
+              listen.group = www-data
+              listen.mode = 0660
+              pm = dynamic
+              pm.max_children = 5
+              pm.start_servers = 2
+              pm.min_spare_servers = 1
+              pm.max_spare_servers = 3
+              EOF
+
+              echo "Starting PHP-FPM..."
+              php-fpm --nodaemonize
+          volumeMounts:
+            - name: laravel-src
+              mountPath: /var/www
+            - name: laravel-env
+              mountPath: /config
+          env:
+            - name: DB_CONNECTION
+              value: mysql
+            - name: DB_HOST
+              value: "127.0.0.1"
+            - name: DB_PORT
+              value: "3306"
+            - name: DB_DATABASE
+              value: laravel-db
+            - name: DB_USERNAME
+              value: root
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_ROOT_PASSWORD
+
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - containerPort: 8080
+          command: ["/bin/sh"]
+          args:
+            - -c
+            - |
+              echo "Starting Nginx container..."
+
+              # Install netcat for port checking
+              apt-get update && apt-get install -y netcat-openbsd && rm -rf /var/lib/apt/lists/*
+
+              # Wait for Laravel files to be ready
+              echo "Waiting for Laravel public directory..."
+              timeout=180
+              while [ ! -f /var/www/public/index.php ] && [ $timeout -gt 0 ]; do
+                echo "Waiting for Laravel files... ($timeout seconds left)"
+                sleep 3
+                timeout=$((timeout-3))
+              done
+
+              if [ ! -f /var/www/public/index.php ]; then
+                echo "Laravel files not found after timeout!"
+                echo "Contents of /var/www:"
+                ls -la /var/www/
+                echo "Contents of /var/www/public:"
+                ls -la /var/www/public/ 2>/dev/null || echo "Public directory not found"
+                exit 1
+              fi
+              echo "Laravel files found!"
+
+              # Wait for PHP-FPM to be ready
+              echo "Waiting for PHP-FPM to start..."
+              timeout=60
+              while ! nc -z 127.0.0.1 9000 && [ $timeout -gt 0 ]; do
+                echo "Waiting for PHP-FPM... ($timeout seconds left)"
+                sleep 2
+                timeout=$((timeout-2))
+              done
+
+              if ! nc -z 127.0.0.1 9000; then
+                echo "PHP-FPM not ready after timeout!"
+                exit 1
+              fi
+              echo "PHP-FPM is ready!"
+
+              # Start Nginx
+              echo "Starting Nginx..."
+              nginx -g "daemon off;"
+          volumeMounts:
+            - name: laravel-src
+              mountPath: /var/www
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+
+        - name: mysql
+          image: mysql:8.0
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_DATABASE
+              value: laravel-db
+          ports:
+            - containerPort: 3306
+          volumeMounts:
+            - name: mysql-storage
+              mountPath: /var/lib/mysql
+
+      volumes:
+        - name: laravel-src
+          emptyDir: {}
+        - name: laravel-env
+          configMap:
+            name: laravel-config
+        - name: nginx-conf
+          configMap:
+            name: nginx-config
+        - name: mysql-storage
+          persistentVolumeClaim:
+            claimName: mysql-pvc
